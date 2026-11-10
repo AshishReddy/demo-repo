@@ -2,7 +2,6 @@ apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: demo-app-route
-  namespace: demo-application
   labels:
     app: demo-app
 spec:
