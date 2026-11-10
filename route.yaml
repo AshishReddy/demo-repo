@@ -11,5 +11,3 @@ spec:
     weight: 100
   port:
     targetPort: http  # Connects to the 'http' port defined in the service above
-  tls:
-    termination: edge # Enables standard SSL termination via OpenShift Router
