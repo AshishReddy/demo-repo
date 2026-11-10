@@ -1,0 +1,16 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: demo-app-route
+  namespace: demo-application
+  labels:
+    app: demo-app
+spec:
+  to:
+    kind: Service
+    name: demo-app-service
+    weight: 100
+  port:
+    targetPort: http  # Connects to the 'http' port defined in the service above
+  tls:
+    termination: edge # Enables standard SSL termination via OpenShift Router

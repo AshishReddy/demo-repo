@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app-service
+  namespace: demo-application
+  labels:
+    app: demo-app
+spec:
+  ports:
+  - name: http
+    port: 8080        # The port exposed inside the cluster
+    targetPort: 8080  # Directs traffic to port 8080 inside your bitnami/nginx pods
+    protocol: TCP
+  selector:
+    app: demo-app     # Matches your deployment's matchLabels exactly
