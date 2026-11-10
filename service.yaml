@@ -7,8 +7,8 @@ metadata:
 spec:
   ports:
   - name: http
-    port: 8080        # The port exposed inside the cluster
-    targetPort: 8080  # Directs traffic to port 8080 inside your bitnami/nginx pods
+    port: 80        # The port exposed inside the cluster
+    targetPort: 80  # Directs traffic to port 8080 inside your bitnami/nginx pods
     protocol: TCP
   selector:
     app: demo-app     # Matches your deployment's matchLabels exactly
