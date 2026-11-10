@@ -5,6 +5,8 @@ metadata:
   labels:
     app: demo-app
 spec:
+  tls:
+    termination: edge
   to:
     kind: Service
     name: demo-app-service
