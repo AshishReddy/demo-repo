@@ -1,27 +1,65 @@
-# ArgoCD DNS Troubleshooting on SNO 
+# Troubleshooting Argo CD GitHub DNS Resolution Issues on Single Node OpenShift (SNO)
 
-The core reason is a Go runtime DNS resolver mismatch inside the Argo CD container binaries, combined with how OpenShift's ndots:5 search path behaves on a local laptop network.
-Even though standard Linux tools (curl, git, nslookup) inside the pod resolve github.com properly via the system C-library (glibc), the compiled Go binaries running Argo CD (argocd-repo-server, argocd-server) bypass standard system calls and hit a DNS query failure.
+## Overview
 
-1. Go's Built-In DNS Resolver vs. glibc
+When running **Red Hat OpenShift GitOps (Argo CD)** on a local **Single Node OpenShift (SNO)** cluster (such as on a laptop using VMware, VirtualBox, or libvirt), Argo CD pods often fail to pull or sync public GitHub repositories with a `no such host` or DNS lookup timeout error.
 
-• Why curl and git worked: Standard command-line utilities use the container's OS C-library (glibc) to read /etc/resolv.conf. They handle local router quirks, slow responses, or IPv6 fallbacks gracefully.
-• Why Argo CD failed: Argo CD is written in Go. On Alpine/UBI minimal containers, Go often uses its own pure-Go internal DNS resolver instead of the system resolver. This internal resolver sends concurrent A (IPv4) and AAAA (IPv6) queries directly to 172.30.0.10 (CoreDNS). If your laptop's virtual network or home router drops IPv6 queries or responds slowly to dual queries, Go's resolver times out or throws a no such host error—even while curl succeeds.
+Interestingly, running standard networking commands like `curl github.com`, `git clone`, or `nslookup` from inside the `openshift-gitops-repo-server` pod works without issue. 
 
-2. The Kubernetes ndots:5 Search Domain Flood
+This guide explains the root cause behind this discrepancy and provides both an immediate workaround and a permanent fix.
 
-In OpenShift, every pod's /etc/resolv.conf defaults to options ndots:5.
-• Because github.com only has one dot (fewer than 5), the Go resolver does not treat it as a complete domain name at first.
-• Instead, it appends every internal cluster search domain before trying the real internet address (e.g., github.com.openshift-gitops.svc.cluster.local, github.com.svc.cluster.local, github.com.cluster.local, github.com.openshift.local.lan).
-• On a local laptop SNO setup (like VMware/VirtualBox/libvirt), your host hypervisor's NAT DNS forwarder (dnsmasq or home router) often chokes on this rapid burst of NXDOMAIN requests or rate-limits UDP port 53, causing Go's strict lookup timer to fail.
+---
 
-3. Why hostAliases Fixed It Completely
+## Root Cause Analysis
 
-When you patched hostAliases onto the deployments, Kubernetes injected 20.207.73.82 github.com directly into /etc/hosts inside those pods. Both glibc and Go's internal DNS resolver always check /etc/hosts before sending any UDP packets to CoreDNS (172.30.0.10), completely bypassing the ndots:5 search flood and IPv6/NAT resolver quirks.
+### 1. Go's Built-in DNS Resolver vs. System `glibc`
+* **Why `curl` and `git` succeed:** Standard Linux utilities use the container's OS C-library (`glibc`) to resolve domains via `/etc/resolv.conf`. They handle local router quirks, slow responses, and IPv6 fallbacks gracefully.
+* **Why Argo CD fails:** Argo CD components (`argocd-repo-server` and `argocd-server`) are compiled **Go** binaries. In minimal container images (UBI/Alpine), Go defaults to its pure-Go internal DNS resolver instead of calling the system resolver. This internal resolver sends concurrent `A` (IPv4) and `AAAA` (IPv6) DNS queries directly to CoreDNS (`172.30.0.10`). If your laptop's hypervisor NAT network or home router drops IPv6 queries or responds slowly to dual requests, Go's strict lookup timer fails.
 
-How to Fix It Permanently Without Hardcoding IPs
+### 2. Kubernetes `ndots:5` Search Domain Flood
+By default, OpenShift configures pod `/etc/resolv.conf` files with `options ndots:5`. 
+* Because `github.com` contains only **one dot** (fewer than 5), Go's resolver does not treat it as a fully qualified domain name (FQDN) initially.
+* Instead, it appends every internal cluster search domain before querying the external internet (e.g., `github.com.openshift-gitops.svc.cluster.local`, `github.com.svc.cluster.local`, `github.com.cluster.local`).
+* Local laptop NAT DNS forwarders (`dnsmasq` or consumer routers) frequently choke on or rate-limit this rapid burst of `NXDOMAIN` lookups over UDP port 53.
 
-'''
+### 3. Why `hostAliases` Resolves the Issue
+Injecting `hostAliases` into the pod specifications adds a static entry directly into `/etc/hosts` inside each container. Both `glibc` and Go's internal DNS resolver read `/etc/hosts` **before** sending any queries to CoreDNS, completely bypassing the `ndots:5` search flood and IPv6/NAT timeout issues.
+
+---
+
+## Solution 1: Immediate Workaround (`hostAliases`)
+
+You can inject GitHub's IP address directly into the `openshift-gitops` workloads using `oc patch`. Because the OpenShift GitOps Operator preserves user-defined `hostAliases`, these patches will persist across pod restarts.
+
+> **Note:** Verify the current IP address for `github.com` using `nslookup github.com` before running these commands.
+
+```bash
+# 1. Patch the Repo Server (handles Git fetching)
+oc patch deployment/openshift-gitops-repo-server -n openshift-gitops --type='json' \
+  -p='[{"op": "add", "path": "/spec/template/spec/hostAliases", "value": [{"ip": "20.207.73.82", "hostnames": ["github.com"]}]}]'
+
+# 2. Patch the API Server UI
+oc patch deployment/openshift-gitops-server -n openshift-gitops --type='json' \
+  -p='[{"op": "add", "path": "/spec/template/spec/hostAliases", "value": [{"ip": "20.207.73.82", "hostnames": ["github.com"]}]}]'
+
+# 3. Patch the Application Controller (manages sync states)
+oc patch statefulset/openshift-gitops-application-controller -n openshift-gitops --type='json' \
+  -p='[{"op": "add", "path": "/spec/template/spec/hostAliases", "value": [{"ip": "20.207.73.82", "hostnames": ["github.com"]}]}]'
+
+# 4. Patch the Redis Cache
+oc patch deployment/openshift-gitops-redis -n openshift-gitops --type='json' \
+  -p='[{"op": "add", "path": "/spec/template/spec/hostAliases", "value": [{"ip": "20.207.73.82", "hostnames": ["github.com"]}]}]'
+```
+
+---
+
+## Solution 2: Permanent Fix (`GODEBUG=netdns=cgo`)
+
+Because GitHub's IP addresses can rotate over time, hardcoding IPs via `hostAliases` is best used as a temporary measure. 
+
+To fix DNS resolution permanently without hardcoding IPs, instruct the Argo CD Go binaries to use the OS system resolver (`cgo`) instead of Go's internal DNS resolver:
+
+```bash
 oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
 spec:
   repo:
@@ -33,24 +71,7 @@ spec:
     - name: GODEBUG
       value: "netdns=cgo"
 '
-'''
+```
 
-Since GitHub's IP addresses occasionally rotate, hardcoding 20.207.73.82 can eventually break. You can force Go to behave properly or stop the ndots flood cleanly on your SNO cluster:
-• Option A: Force Argo CD to use the OS (glibc) DNS resolver
-Add the GODEBUG=netdns=cgo environment variable to the Argo CD custom resource so Go stops using its picky internal resolver and uses the exact same DNS path as curl and git:bash
-oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
-spec:
-  repo:
-    env:
-    - name: GODEBUG
-      value: "netdns=cgo"
-  server:
-    env:
-    - name: GODEBUG
-      value: "netdns=cgo"
-'
-Use code with caution.
-• Option B: Lower ndots on the Argo CD pods
-Add a dnsConfig to your deployments to set ndots: "2", stopping the cluster from spamming your laptop's virtual router with internal search domains for external websites.
-Would you like to test removing the hardcoded hostAliases and applying the GODEBUG=netdns=cgo patch so your cluster automatically tracks GitHub's IP changes going forward?
+Once the pods finish rolling out, Argo CD will resolve `github.com` dynamically using the exact same reliable path as `curl` and `git`.
 
