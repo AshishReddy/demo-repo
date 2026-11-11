@@ -21,6 +21,20 @@ When you patched hostAliases onto the deployments, Kubernetes injected 20.207.73
 
 How to Fix It Permanently Without Hardcoding IPs
 
+'''
+oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
+spec:
+  repo:
+    env:
+    - name: GODEBUG
+      value: "netdns=cgo"
+  server:
+    env:
+    - name: GODEBUG
+      value: "netdns=cgo"
+'
+'''
+
 Since GitHub's IP addresses occasionally rotate, hardcoding 20.207.73.82 can eventually break. You can force Go to behave properly or stop the ndots flood cleanly on your SNO cluster:
 • Option A: Force Argo CD to use the OS (glibc) DNS resolver
 Add the GODEBUG=netdns=cgo environment variable to the Argo CD custom resource so Go stops using its picky internal resolver and uses the exact same DNS path as curl and git:bash
